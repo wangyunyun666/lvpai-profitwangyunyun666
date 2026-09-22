@@ -509,6 +509,69 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
         micro_travel_cnt = len(micro_travel_oids)
         micro_wedding_cnt = len(micro_wedding_oids)
         micro_xinjiang_cnt = len(micro_xinjiang_oids)
+
+        # ---------- 转化率（毛客数 ÷ 订单数）数据准备 ----------
+        # 代表月：单月模式用 period_month；多月模式取首月 period_months[0] 作代表
+        _conv_rep_month = period_month if period_month is not None else (period_months[0] if period_months else None)
+
+        def _shift_month(p, delta):
+            """对 'YYYY-MM' 形式的期间字符串平移若干个月，自动处理跨年（如 2026-01 -> 2025-12）。"""
+            if not p:
+                return None
+            y, m = map(int, str(p).split('-'))
+            total = y * 12 + (m - 1) + delta
+            return f"{total // 12}-{total % 12 + 1:02d}"
+
+        def _safe_rate(gross_leads, order_count):
+            """安全除法计算转化率：转化率 = 订单数(order_count) ÷ 毛客数(gross_leads)。
+
+            说明（重要）：需求正文公式误写为「毛客数(gross_leads) ÷ 订单数(order_count)」，
+            但该写法在真实库下会得到 18785÷1988≈944.9%（转化率不可能 >100%，且与其自带
+            示例「1988÷18785≈10.6%」、预期吻合值、以及「订单/毛客」标准语义均矛盾）。
+            因此此处按需求「预期吻合」一节给出的数值与真实库字段语义实现：
+            转化率 = order_count / gross_leads。
+            分母(毛客数)或分子(订单数)为 0 / None 时返回 None（渲染为 —），禁止除零与显示 0 误导。
+            """
+            if gross_leads is None or order_count is None or gross_leads <= 0 or order_count <= 0:
+                return None
+            return order_count / gross_leads
+
+        def _fetch_conv(period_str):
+            """按期间查询各业务类型的 gross_leads 与 order_count 汇总（单条 GROUP BY 查询）。"""
+            if not period_str:
+                return {}
+            rows = (db.query(MonthlyStats.business_type,
+                             func.sum(MonthlyStats.gross_leads),
+                             func.sum(MonthlyStats.order_count))
+                      .filter_by(period=period_str)
+                      .group_by(MonthlyStats.business_type)
+                      .all())
+            return {bt: (gl or 0, oc or 0) for bt, gl, oc in rows}
+
+        _conv_cur_m = _conv_rep_month
+        _conv_last_m = _shift_month(_conv_rep_month, -1)
+        _conv_ly_m = _shift_month(_conv_rep_month, -12)
+
+        _conv_raw = {
+            'cur': _fetch_conv(_conv_cur_m),
+            'last': _fetch_conv(_conv_last_m),
+            'ly': _fetch_conv(_conv_ly_m),
+        }
+
+        _CONV_BIZ_TYPES = ['旅拍', '婚礼', '新疆']
+        conv_df = pd.DataFrame([
+            {
+                '业务类型': bt,
+                '本月转化率': _safe_rate(*_conv_raw['cur'].get(bt, (0, 0))),
+                '上月转化率': _safe_rate(*_conv_raw['last'].get(bt, (0, 0))),
+                '上年同期转化率': _safe_rate(*_conv_raw['ly'].get(bt, (0, 0))),
+            }
+            for bt in _CONV_BIZ_TYPES
+        ])
+        # 格式化：None → 短横 —
+        for _col in ['本月转化率', '上月转化率', '上年同期转化率']:
+            conv_df[_col] = conv_df[_col].apply(lambda r: f"{r:.1%}" if r is not None else "—")
+
         db.close()
 
         if month is not None:
@@ -1230,6 +1293,16 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                 st.session_state[f'avg_df_{biz_type}'] = df_avg
                 st.session_state[f'detail_df_{biz_type}'] = detail_df if 'detail_df' in locals() else pd.DataFrame()
                 st.session_state[f'salary_df_{biz_type}'] = salary_df if 'salary_df' in locals() else pd.DataFrame()
+
+    # ==================== 转化率展示区块（毛客数 ÷ 订单数） ====================
+    st.divider()
+    st.subheader("📊 转化率（成交订单数 ÷ 毛客数）")
+    st.dataframe(conv_df.set_index('业务类型'), width='stretch')
+    st.caption(
+        f"口径：转化率 = 订单数(order_count) ÷ 毛客数(gross_leads)，以百分比展示；"
+        f"代表月 → 本月 {_conv_cur_m}｜上月 {_conv_last_m}（环比）｜上年同期 {_conv_ly_m}（同比）。"
+        f"— 表示无数据，或毛客数/订单数为 0。"
+    )
 
     # ==================== 准备导出报告数据 ====================
     if filter_option == "全部":
