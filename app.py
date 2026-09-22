@@ -305,7 +305,7 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
     if (!g) return;
     var d = REPORT_DATA[caliber];
     var rows = g.rows;
-    var divisor = g.isAll ? num((d.totals || {})['套系数量']) : num(g.scope['套系数量']);
+    var div = (REPORT_DATA.divisors || {orders:0, qty:0});
     var present = [], values = [];
     var col0 = rows[0] || {};
     for (var k=0;k<AVG_COLS.length;k++){
@@ -313,6 +313,12 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
       if (Object.prototype.hasOwnProperty.call(col0, col)){
         var total = 0;
         for (var i=0;i<rows.length;i++){ total += num(rows[i][col]); }
+        var divisor;
+        if (col === '人工成本' || col === '推广费用（实际）'){
+          divisor = caliber === 'allocation' ? num(div.orders) : num(div.qty);
+        } else {
+          divisor = num(div.qty);
+        }
         present.push(col);
         values.push(divisor ? total/divisor : 0);
       }
@@ -320,6 +326,41 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
     var traces = [{ type:'bar', x:present, y:values, marker:{color:'#4f46e5'}, hovertemplate:'%{x}<br>单均: ¥%{y:,.2f}<extra></extra>' }];
     var layout = { title:{text:'主要费用项均价（按订单数分摊）'}, xaxis:{tickangle:-45, automargin:true, tickfont:{size:10}}, yaxis:{title:{text:'单均 (元/单)'}}, font:FONT };
     if (typeof Plotly !== 'undefined') Plotly.react('avg_chart', traces, layout, {responsive:true, displayModeBar:true});
+  }
+
+  // 重绘「均价及同比环比分析」表中的「本期均价 / 除数」两列：
+  // 人工成本、推广费用（实际）随口径切换除数（分摊=下单订单数，实际=选片订单总数）；其余费用项与口径无关。
+  function renderAvgTable(caliber){
+    var d = REPORT_DATA[caliber];
+    if (!d || !d.rows) return;
+    var div = (REPORT_DATA.divisors || {orders:0, qty:0});
+    function colSum(colName){
+      var s = 0;
+      for (var i=0;i<d.rows.length;i++){ var v = d.rows[i][colName]; if (v !== null && v !== undefined) s += num(v); }
+      return s;
+    }
+    var ordersDiv = caliber === 'allocation' ? num(div.orders) : num(div.qty);
+    var divisorLabel = caliber === 'allocation' ? '下单订单数' : '选片订单总数';
+    var items = [
+      {name:'人工成本', sum: colSum('人工成本')},
+      {name:'推广费用（实际）', sum: colSum('推广费用（实际）')}
+    ];
+    var body = document.getElementById('avgTableBody');
+    if (!body) return;
+    var trs = body.querySelectorAll('tr');
+    for (var t=0;t<trs.length;t++){
+      var tds = trs[t].querySelectorAll('td');
+      if (tds.length < 3) continue;
+      var nm = (tds[0].textContent || '').trim();
+      for (var j=0;j<items.length;j++){
+        if (nm === items[j].name){
+          var val = ordersDiv ? items[j].sum / ordersDiv : 0;
+          tds[1].textContent = fmtMoney(val);
+          tds[2].textContent = divisorLabel + ': ' + Math.round(ordersDiv);
+          break;
+        }
+      }
+    }
   }
 
   function renderTable(caliber){
@@ -385,6 +426,7 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
     renderCost(caliber, setOption);
     renderProfit(caliber, setOption);
     renderAvg(caliber, setOption);
+    renderAvgTable(caliber);
   }
 
   caliberSelect.addEventListener('change', function(){
@@ -500,7 +542,7 @@ def generate_html_report(df_biz, total_income, total_direct, total_indirect, tot
     <div class="table-wrapper">
         <table>
             <thead><tr><th>费用项</th><th>本期均价</th><th>除数</th><th>去年同期均价</th><th>同比差异</th><th>同比变化</th><th>上月均价</th><th>上月除数</th><th>环比差异</th><th>环比变化</th></tr></thead>
-            <tbody>{avg_table_rows}</tbody>
+            <tbody id="avgTableBody">{avg_table_rows}</tbody>
         </table>
     </div>
 
@@ -1643,6 +1685,24 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
     st.divider()
 
     export_biz_type = "全部业务" if filter_option == "全部" else ("新疆" if filter_option == "仅新疆地区" else ("旅拍" if filter_option == "仅旅拍" else "婚礼"))
+
+    # 前端口径联动：注入除数（与口径无关，按筛选范围业务类型）
+    # 人工成本、推广费用（实际）在分摊口径下除数应为「下单订单数」，实际口径下为「选片订单总数」
+    if export_biz_type == "全部业务":
+        _orders = (travel_order_cnt or 0) + (wedding_order_cnt or 0)
+    elif export_biz_type == "新疆":
+        _orders = xinjiang_order_cnt or 0
+    elif export_biz_type == "旅拍":
+        _orders = travel_order_cnt or 0
+    else:
+        _orders = wedding_order_cnt or 0
+    report_payload['divisors'] = {
+        'orders': float(_orders or 0),
+        'qty': float(report_df['套系数量'].sum() or 0),
+    }
+    # 重新序列化（含 divisors），供前端切换口径时重算人工/推广均价与除数
+    report_data_json = json.dumps(report_payload, ensure_ascii=False)
+    json.loads(report_data_json)  # 自检：确保序列化结果无 NaN/NaT 非法字面量
 
     avg_df = st.session_state.get(f'avg_df_{export_biz_type}', pd.DataFrame())
     detail_df = st.session_state.get(f'detail_df_{export_biz_type}', pd.DataFrame())
