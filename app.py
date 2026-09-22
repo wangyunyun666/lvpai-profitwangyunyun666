@@ -315,9 +315,13 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
         for (var i=0;i<rows.length;i++){ total += num(rows[i][col]); }
         var divisor;
         if (col === '人工成本' || col === '推广费用（实际）'){
-          divisor = caliber === 'allocation' ? num(div.orders) : num(div.qty);
+          // 人工成本、推广费用（实际）：分摊口径除以下单订单数，实际口径除以选片订单总数
+          // 单套系筛选时前端无逐套系下单订单数，沿用该套系选片订单总数（与页面口径一致）
+          divisor = g.isAll
+            ? (caliber === 'allocation' ? num(div.orders) : num(div.qty))
+            : num(g.scope['套系数量']);
         } else {
-          divisor = num(div.qty);
+          divisor = g.isAll ? num(div.qty) : num(g.scope['套系数量']);
         }
         present.push(col);
         values.push(divisor ? total/divisor : 0);
