@@ -1,4 +1,4 @@
-﻿# database.py
+# database.py
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, func, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -18,7 +18,14 @@ if DATABASE_URL.startswith("sqlite"):
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 else:
-    engine = create_engine(DATABASE_URL)
+    # Neon 为无服务器库，空闲连接会被断开；开启 pool_pre_ping 探活，
+    # 连接失效时自动重连，避免 Streamlit Cloud 复用死连接抛 OperationalError
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=280,
+        connect_args={"connect_timeout": 10},
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
