@@ -394,7 +394,7 @@ def profit_report_page():
         else:
             period_label = f"{min_year}年{min_month}月-{max_year}年{max_month}月"
             month_list = [f"{y}-{m:02d}" for y, m in month_parts]
-            df_multi = generate_profit_report_multi_month(month_list, promo_mode)
+            df_multi = generate_profit_report_multi_month(*month_list, promo_mode)
             _render_profit_report(period_start, period_end, filter_option, period_label, None, None, can_see, df_full=df_multi, promo_mode=promo_mode)
 
     elif period_mode == "按年":

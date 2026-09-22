@@ -3,7 +3,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 from database import SessionLocal, Order, SetStandardCost, ActualDirectCost, CherryProductCost, IndirectCost, AllocationRule, MonthlyStats
 from sqlalchemy import func
+from streamlit import cache_data
 
+@cache_data(ttl=600, show_spinner="正在生成利润报表…")
 def generate_profit_report(period_start, period_end, promo_mode='actual'):
     db = SessionLocal()
     try:
@@ -16,6 +18,7 @@ def generate_profit_report(period_start, period_end, promo_mode='actual'):
             func.date(Order.selection_date) <= end_date
         ).all()
         orders = [o for o in orders if o.type and str(o.type).strip() != '']
+        order_ids = [o.order_id for o in orders]
         if not orders:
             return pd.DataFrame()
 
@@ -34,7 +37,9 @@ def generate_profit_report(period_start, period_end, promo_mode='actual'):
             std_df = pd.DataFrame([{'set_name': s.set_name, 'cost_item': s.cost_item, 'amount': s.amount} for s in std_all])
             std_pivot = std_df.pivot(index='set_name', columns='cost_item', values='amount').fillna(0)
 
-        actual_all = db.query(ActualDirectCost).all()
+        actual_all = db.query(ActualDirectCost).filter(
+            ActualDirectCost.order_id.in_(order_ids)
+        ).all()
         actual_pivot = pd.DataFrame()
         actual_existing = set()
         if actual_all:
@@ -51,7 +56,10 @@ def generate_profit_report(period_start, period_end, promo_mode='actual'):
             costs = db.query(
                 CherryProductCost.order_id,
                 func.sum(CherryProductCost.product_total_cost).label('total_cost')
-            ).filter(CherryProductCost.batch_id == latest_batch.batch_id).group_by(CherryProductCost.order_id).all()
+            ).filter(
+                CherryProductCost.batch_id == latest_batch.batch_id,
+                CherryProductCost.order_id.in_(order_ids)
+            ).group_by(CherryProductCost.order_id).all()
             for c in costs:
                 cherry_costs[c.order_id] = c.total_cost or 0.0
 
@@ -413,7 +421,8 @@ def generate_profit_report(period_start, period_end, promo_mode='actual'):
         db.close()
 
 
-def generate_profit_report_multi_month(period_months, promo_mode='actual'):
+@cache_data(ttl=600, show_spinner="正在生成利润报表…")
+def generate_profit_report_multi_month(*period_months, promo_mode='actual'):
     """
     按月逐个生成利润报告，然后将各月结果按套系合并，并重新按总期间统一分摊人工成本。
     """
@@ -477,13 +486,14 @@ def generate_profit_report_multi_month(period_months, promo_mode='actual'):
         else:
             end_date = datetime(y, m + 1, 1).date() - timedelta(days=1)
 
-        orders = db.query(Order).filter(
+        qty_rows = db.query(Order.type, func.count()).filter(
             Order.selection_date >= start_date,
-            Order.selection_date <= end_date
-        ).all()
-        orders = [o for o in orders if o.type and str(o.type).strip() != '']
-        travel_qty = sum(1 for o in orders if o.type == '旅拍')
-        wedding_qty = sum(1 for o in orders if o.type == '婚礼')
+            Order.selection_date <= end_date,
+            Order.type.isnot(None),
+            func.trim(Order.type) != ''
+        ).group_by(Order.type).all()
+        travel_qty = sum(c for t, c in qty_rows if t == '旅拍')
+        wedding_qty = sum(c for t, c in qty_rows if t == '婚礼')
 
         travel_order_cnt = 0.0
         wedding_order_cnt = 0.0
