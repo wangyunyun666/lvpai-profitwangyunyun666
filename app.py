@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import json
 import io
-import matplotlib.pyplot as plt
 pd.set_option("styler.render.max_elements", 10**9)  # 设置为10亿，足够覆盖任何查询结果
 from datetime import datetime, date, timedelta
 from database import SessionLocal, User, Order, SetStandardCost, ActualDirectCost, CherryProductCost, IndirectCost, AllocationRule, OperationLog, MonthlyStats, ModulePermission, ProfitSnapshot, EmployeeSalary
@@ -209,12 +208,20 @@ def permission_management_page():
 
 def generate_html_report(df_biz, total_income, total_direct, total_indirect, total_profit, total_orders,
                          period_label, filter_option, fee_table_rows, avg_table_rows, shoot_table_rows, labor_table_rows,
-                         set_table_full_html, cost_chart_img, profit_chart_img, avg_chart_img):
+                         set_table_full_html, cost_chart_html, profit_chart_html, avg_chart_html, caliber_label="实际口径"):
+    # 成本口径说明（直接费用 / 间接费用）备注块，原样保留中文与换行
+    caliber_remark_html = '''<div style="margin:24px 0;padding:16px 20px;border:1px solid #e2e8f0;border-left:4px solid #4f46e5;border-radius:12px;background:#fff;">
+  <div style="font-size:1.05rem;font-weight:700;margin-bottom:8px;">📌 成本口径说明（直接费用 / 间接费用）</div>
+  <div style="margin-bottom:6px;"><strong>【直接费用】</strong>计入「总直接成本」列，包含：推广费用（实际）（即"推广客资费（实际）"）、交付费用（场地）、交付费用（主持）、交付费用（搭建）、鲜花费用、微电影拍摄费用、拍摄费用（即"拍摄费用 (郭鹏)"）、二销选片费（即"门店二销款结算费"）、像素蛋糕修图费、微电影剪辑费用、后期修片费 (一销)、后期修片费 (二销)、工厂费用（一销）、工厂费用（二销）</div>
+  <div style="margin-bottom:6px;"><strong>【间接费用】</strong>计入「总间接成本」列，包含：房租、水电、办公费等；税费及手续费；样片研发；场地铺设费；舆情处理</div>
+  <div style="color:#b45309;"><strong>⚠️ 对账提示：</strong>当前系统计算时，「人工成本（工资，7 个部门）」也计入「总直接成本」，上表未单列——用你自己的表对账时，请把工资一并计入直接费用，否则两边会差一块。</div>
+</div>'''
     html = f'''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <title>利润分析报告</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
     <style>
         body {{ font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f8fafc; margin: 20px; color: #1e293b; }}
         .header {{ text-align: center; margin-bottom: 30px; }}
@@ -239,7 +246,8 @@ def generate_html_report(df_biz, total_income, total_direct, total_indirect, tot
 <body>
     <div class="header">
         <h1>📊 利润分析报告</h1>
-        <p>{period_label} · {filter_option} · 订单总数 {total_orders}</p>
+        <p>{period_label} · {filter_option} · 订单总数 {total_orders}
+        <span style="{{background:#4f46e5;color:#fff;padding:4px 14px;border-radius:999px;font-weight:600;margin-left:8px;}}">{caliber_label}</span></p>
     </div>
 
     <div class="kpi-grid">
@@ -249,8 +257,8 @@ def generate_html_report(df_biz, total_income, total_direct, total_indirect, tot
     </div>
 
     <div class="chart-row">
-        <div class="chart-box"><h3>成本与利润结构</h3><img src="{cost_chart_img}" alt="成本结构图" /></div>
-        <div class="chart-box"><h3>各套系利润对比</h3><img src="{profit_chart_img}" alt="套系利润图" /></div>
+        <div class="chart-box"><h3>成本与利润结构</h3>{cost_chart_html}</div>
+        <div class="chart-box"><h3>各套系利润对比</h3>{profit_chart_html}</div>
     </div>
 
     <div class="section-title">📸 拍摄费用明细分析（含同比）</div>
@@ -288,7 +296,9 @@ def generate_html_report(df_biz, total_income, total_direct, total_indirect, tot
     <div class="section-title">📋 套系利润明细表</div>
     {set_table_full_html}
 
-    <div class="chart-box"><h3>🔸 主要费用项均价</h3><img src="{avg_chart_img}" alt="主要费用项均价图" /></div>
+    <div class="chart-box"><h3>🔸 主要费用项均价</h3>{avg_chart_html}</div>
+
+    {caliber_remark_html}
 </body>
 </html>'''
     return html
@@ -401,13 +411,6 @@ def profit_report_page():
         st.info("按年统计功能开发中，请使用按月筛选。")
 
 def _render_profit_report(period_start, period_end, filter_option, period_month, year, month, can_see, is_week=False, df_full=None, promo_mode='actual'):
-    # 设置 matplotlib 中文字体
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'PingFang SC', 'Heiti TC']
-    plt.rcParams['axes.unicode_minus'] = False
-
     # ==================== 费用列名映射 ====================
     fee_columns = [
         ('推广费用（实际）', '推广费用', '线上线下广告投放、推广活动，已按订单数分摊'),
@@ -1304,6 +1307,29 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
         f"— 表示无数据，或毛客数/订单数为 0。"
     )
 
+    # ==================== 成本口径说明备注区块（纯展示，无计算逻辑） ====================
+    st.info("""
+📌 成本口径说明（直接费用 / 间接费用）
+【直接费用】计入「总直接成本」列，包含：
+· 推广费用（实际）（即"推广客资费（实际）"）
+· 交付费用（场地）、交付费用（主持）、交付费用（搭建）
+· 鲜花费用
+· 微电影拍摄费用
+· 拍摄费用（即"拍摄费用 (郭鹏)"）
+· 二销选片费（即"门店二销款结算费"）
+· 像素蛋糕修图费
+· 微电影剪辑费用
+· 后期修片费 (一销)、后期修片费 (二销)
+· 工厂费用（一销）、工厂费用（二销）
+【间接费用】计入「总间接成本」列，包含：
+· 房租、水电、办公费等
+· 税费及手续费
+· 样片研发
+· 场地铺设费
+· 舆情处理
+⚠️ 对账提示：当前系统计算时，「人工成本（工资，7 个部门）」也计入「总直接成本」，上表未单列——用你自己的表对账时，请把工资一并计入直接费用，否则两边会差一块。
+""")
+
     # ==================== 准备导出报告数据 ====================
     if filter_option == "全部":
         report_df = df_data
@@ -1405,57 +1431,105 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
         labor_columns += ['上月均价', '环比差异', '环比变化']
     labor_table_html = df_to_html_rows(salary_df, labor_columns)
 
-    import io
-    import base64
+    # ==================== 交互式 Plotly 图表（HTML + CDN，无需服务器安装字体） ====================
+    def plotly_chart_html(div_id: str, traces: list, layout: dict) -> str:
+        """生成 Plotly 交互图表的 HTML 片段，浏览器通过 CDN 加载 Plotly.js 渲染（支持悬停/缩放，中文正常）。"""
+        data_json = json.dumps(traces, ensure_ascii=False)
+        layout_json = json.dumps(layout, ensure_ascii=False)
+        return (
+            f'<div id="{div_id}" style="width:100%;height:380px;"></div>'
+            f'<script>Plotly.newPlot("{div_id}", {data_json}, {layout_json}, '
+            f'{{"responsive": true, "displayModeBar": true}});</script>'
+        )
 
-    def fig_to_base64(fig):
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-        buf.seek(0)
-        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-        plt.close(fig)
-        return f"data:image/png;base64,{img_base64}"
+    # 推广费口径标签（来自函数入参 promo_mode），用于徽章与导出文件名
+    promo_mode_label = "实际口径" if promo_mode == 'actual' else "分摊口径"
 
-    # 成本与利润结构图（修复负值问题）
-    fig1, ax1 = plt.subplots(figsize=(5,4))
-    cost_data = [total_dir + total_ind, total_prof]
-    if total_prof < 0:
-        ax1.bar(['总成本', '利润'], cost_data, color=['#ef4444', '#10b981'])
-        ax1.axhline(0, color='black', linewidth=0.8)
-        ax1.set_ylabel('金额 (元)')
+    # 图1 成本与利润结构：利润为负时用红色柱状，否则用饼图
+    total_cost = total_dir + total_ind
+    profit_color = "#10b981" if total_prof >= 0 else "#ef4444"
+    font_cfg = {"family": "'PingFang SC','Microsoft YaHei',sans-serif"}
+    if total_prof >= 0:
+        cost_traces = [{
+            "type": "pie",
+            "labels": ["总成本", "利润"],
+            "values": [total_cost, total_prof],
+            "marker": {"colors": ["#ef4444", profit_color]},
+            "textinfo": "label+percent",
+            "hole": 0.0,
+        }]
+        cost_layout = {"title": {"text": "成本与利润结构"}, "font": font_cfg}
     else:
-        ax1.pie(cost_data, labels=['总成本', '利润'], autopct='%1.1f%%', startangle=90, colors=['#ef4444','#10b981'])
-        ax1.axis('equal')
-    cost_chart_img = fig_to_base64(fig1)
+        cost_traces = [{
+            "type": "bar",
+            "x": ["总成本", "利润"],
+            "y": [total_cost, total_prof],
+            "marker": {"color": ["#ef4444", profit_color]},
+            "hovertemplate": "%{x}<br>金额: ¥%{y:,.2f}<extra></extra>",
+        }]
+        cost_layout = {
+            "title": {"text": "成本与利润结构（利润为负的说明）"},
+            "yaxis": {"title": {"text": "金额 (元)"}},
+            "shapes": [{"type": "line", "x0": -0.5, "x1": 1.5, "y0": 0, "y1": 0,
+                        "line": {"color": "black", "width": 1}}],
+            "font": font_cfg,
+        }
+    cost_chart_html = plotly_chart_html("cost_chart", cost_traces, cost_layout)
 
-    fig2, ax2 = plt.subplots(figsize=(6,4))
-    set_names = report_df['套系'].tolist()
-    set_profits = report_df['利润合计'].tolist()
-    colors = ['#10b981' if p >= 0 else '#ef4444' for p in set_profits]
-    ax2.bar(set_names, set_profits, color=colors)
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    profit_chart_img = fig_to_base64(fig2)
+    # 图2 各套系利润对比（正绿负红）
+    set_names = [str(x) for x in report_df['套系'].tolist()]
+    set_profits = [float(x) for x in report_df['利润合计'].tolist()]
+    set_colors = ["#10b981" if p >= 0 else "#ef4444" for p in set_profits]
+    profit_traces = [{
+        "type": "bar",
+        "x": set_names,
+        "y": set_profits,
+        "marker": {"color": set_colors},
+        "hovertemplate": "%{x}<br>利润: ¥%{y:,.2f}<extra></extra>",
+    }]
+    profit_layout = {
+        "title": {"text": "各套系利润对比"},
+        "xaxis": {"tickangle": -45},
+        "yaxis": {"title": {"text": "利润 (元)"}},
+        "font": font_cfg,
+    }
+    profit_chart_html = plotly_chart_html("profit_chart", profit_traces, profit_layout)
 
-    fig3, ax3 = plt.subplots(figsize=(6,4))
-    top_items = ['拍摄费用', '样片研发', '推广费用', '人工成本', '微电影拍摄', '二销选片费', '微电影剪辑']
-    top_cols = ['拍摄费用', '样片研发', '推广费用（实际）', '人工成本', '微电影拍摄费用', '二销选片费', '微电影剪辑费用']
-    avg_vals = [report_df[col].sum()/total_ord if col in report_df.columns and total_ord else 0 for col in top_cols]
-    ax3.bar(top_items, avg_vals, color='#4f46e5')
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    avg_chart_img = fig_to_base64(fig3)
+    # 图3 主要费用项均价（按订单数分摊，列不存在时跳过）
+    avg_top_cols = ['拍摄费用', '样片研发', '推广费用（实际）', '人工成本', '微电影拍摄费用',
+                    '二销选片费', '微电影剪辑费用']
+    avg_present = []
+    avg_values = []
+    for col in avg_top_cols:
+        if col in report_df.columns and total_ord:
+            avg_present.append(col)
+            avg_values.append(float(report_df[col].sum()) / float(total_ord))
+    avg_traces = [{
+        "type": "bar",
+        "x": avg_present,
+        "y": avg_values,
+        "marker": {"color": "#4f46e5"},
+        "hovertemplate": "%{x}<br>单均: ¥%{y:,.2f}<extra></extra>",
+    }]
+    avg_layout = {
+        "title": {"text": "主要费用项均价（按订单数分摊）"},
+        "xaxis": {"tickangle": -45},
+        "yaxis": {"title": {"text": "单均 (元/单)"}},
+        "font": font_cfg,
+    }
+    avg_chart_html = plotly_chart_html("avg_chart", avg_traces, avg_layout)
 
     html_report = generate_html_report(
         report_df, total_inc, total_dir, total_ind, total_prof, total_ord,
         period_month, filter_option, fee_table_html, avg_table_html, shoot_table_html, labor_table_html,
-        set_table_full_html, cost_chart_img, profit_chart_img, avg_chart_img
+        set_table_full_html, cost_chart_html, profit_chart_html, avg_chart_html,
+        caliber_label=promo_mode_label
     )
 
     st.download_button(
         label="📥 下载HTML分析报告",
         data=html_report,
-        file_name=f"利润分析_{period_month}_{filter_option}.html",
+        file_name=f"利润分析_{period_month}_{filter_option}_{promo_mode_label}.html",
         mime="text/html"
     )
 
