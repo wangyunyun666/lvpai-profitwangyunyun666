@@ -206,9 +206,204 @@ def permission_management_page():
             finally:
                 db.close()
 
+# 交互式报告前端 JS 模板（占位符 __REPORT_DATA_JSON__ / __DEFAULT_CALIBER__ 由 generate_html_report 注入）。
+# 纯前端：切换「费用口径」「套系筛选」下拉时，KPI 卡片、3 张图表、套系利润明细表实时重绘，不依赖服务器。
+_INTERACTIVE_REPORT_JS = """<script>
+const REPORT_DATA = __REPORT_DATA_JSON__;
+(function(){
+  if (typeof REPORT_DATA === 'undefined' || !REPORT_DATA) { return; }
+  var FONT = {family: "'PingFang SC','Microsoft YaHei',sans-serif"};
+  var STRING_COLS = ['套系', '业务类型'];
+  var AVG_COLS = ['拍摄费用','样片研发','推广费用（实际）','人工成本','微电影拍摄费用','二销选片费','微电影剪辑费用'];
+  var SET_ALL = 'ALL';
+  var CALIBER_LABEL = {'actual':'实际口径','allocation':'分摊口径'};
+
+  var caliberSelect = document.getElementById('caliberSelect');
+  var setSelect = document.getElementById('setSelect');
+
+  function fmtMoney(v){
+    if (v === null || v === undefined || isNaN(Number(v))) return '—';
+    return '¥' + Number(v).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2});
+  }
+  function fmtWan(v){
+    if (v === null || v === undefined || isNaN(Number(v))) return '—';
+    return '¥' + (Number(v)/10000).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2}) + '万';
+  }
+  function fmtInt(v){
+    if (v === null || v === undefined || isNaN(Number(v))) return '—';
+    return String(Math.round(Number(v)));
+  }
+  function fmtPct(v){
+    if (v === null || v === undefined || isNaN(Number(v))) return '—';
+    return (Number(v)*100).toFixed(1) + '%';
+  }
+  function num(v){
+    if (v === null || v === undefined) return 0;
+    var n = Number(v);
+    return isNaN(n) ? 0 : n;
+  }
+
+  function getScope(caliber, setOption){
+    var d = REPORT_DATA[caliber];
+    if (!d || !d.rows || d.rows.length === 0) return null;
+    if (setOption === SET_ALL || !setOption){
+      return { rows: d.rows, scope: d.totals || {}, isAll: true };
+    }
+    var row = null;
+    for (var i=0;i<d.rows.length;i++){ if (String(d.rows[i]['套系']) === setOption){ row = d.rows[i]; break; } }
+    if (!row) row = d.rows[0];
+    return { rows: [row], scope: row, isAll: false };
+  }
+
+  function updateKPI(caliber, setOption){
+    var inc = document.getElementById('kpiIncome');
+    var cost = document.getElementById('kpiCost');
+    var prof = document.getElementById('kpiProfit');
+    var g = getScope(caliber, setOption);
+    if (!g){ inc.textContent='—'; cost.textContent='—'; prof.textContent='—'; return; }
+    var s = g.scope;
+    inc.textContent = fmtWan(num(s['总收入']));
+    cost.textContent = fmtWan(num(s['总直接成本']) + num(s['总间接成本']));
+    prof.textContent = fmtWan(num(s['利润合计']));
+  }
+
+  function renderCost(caliber, setOption){
+    var g = getScope(caliber, setOption);
+    if (!g) return;
+    var s = g.scope;
+    var totalCost = num(s['总直接成本']) + num(s['总间接成本']);
+    var profit = num(s['利润合计']);
+    var traces, layout;
+    if (profit >= 0){
+      traces = [{ type:'pie', labels:['总成本','利润'], values:[totalCost, profit], marker:{colors:['#ef4444','#10b981']}, textinfo:'label+percent', hole:0.0 }];
+      layout = { title:{text:'成本与利润结构'}, font:FONT, margin:{t:40,b:10,l:10,r:10} };
+    } else {
+      traces = [{ type:'bar', x:['总成本','利润'], y:[totalCost, profit], marker:{color:['#ef4444','#ef4444']}, hovertemplate:'%{x}<br>金额: ¥%{y:,.2f}<extra></extra>' }];
+      layout = { title:{text:'成本与利润结构（利润为负的说明）'}, yaxis:{title:{text:'金额 (元)'}}, shapes:[{type:'line',x0:-0.5,x1:1.5,y0:0,y1:0,line:{color:'black',width:1}}], font:FONT };
+    }
+    if (typeof Plotly !== 'undefined') Plotly.react('cost_chart', traces, layout, {responsive:true, displayModeBar:true});
+  }
+
+  function renderProfit(caliber, setOption){
+    var g = getScope(caliber, setOption);
+    if (!g) return;
+    var rows = g.rows;
+    var names = [], profits = [], colors = [];
+    for (var i=0;i<rows.length;i++){
+      names.push(String(rows[i]['套系']));
+      var p = num(rows[i]['利润合计']);
+      profits.push(p);
+      colors.push(p >= 0 ? '#10b981' : '#ef4444');
+    }
+    var traces = [{ type:'bar', x:names, y:profits, marker:{color:colors}, hovertemplate:'%{x}<br>利润: ¥%{y:,.2f}<extra></extra>' }];
+    var layout = { title:{text:'各套系利润对比'}, xaxis:{tickangle:-45, automargin:true, tickfont:{size:10}}, yaxis:{title:{text:'利润 (元)'}}, font:FONT };
+    if (typeof Plotly !== 'undefined') Plotly.react('profit_chart', traces, layout, {responsive:true, displayModeBar:true});
+  }
+
+  function renderAvg(caliber, setOption){
+    var g = getScope(caliber, setOption);
+    if (!g) return;
+    var d = REPORT_DATA[caliber];
+    var rows = g.rows;
+    var divisor = g.isAll ? num((d.totals || {})['套系数量']) : num(g.scope['套系数量']);
+    var present = [], values = [];
+    var col0 = rows[0] || {};
+    for (var k=0;k<AVG_COLS.length;k++){
+      var col = AVG_COLS[k];
+      if (Object.prototype.hasOwnProperty.call(col0, col)){
+        var total = 0;
+        for (var i=0;i<rows.length;i++){ total += num(rows[i][col]); }
+        present.push(col);
+        values.push(divisor ? total/divisor : 0);
+      }
+    }
+    var traces = [{ type:'bar', x:present, y:values, marker:{color:'#4f46e5'}, hovertemplate:'%{x}<br>单均: ¥%{y:,.2f}<extra></extra>' }];
+    var layout = { title:{text:'主要费用项均价（按订单数分摊）'}, xaxis:{tickangle:-45, automargin:true, tickfont:{size:10}}, yaxis:{title:{text:'单均 (元/单)'}}, font:FONT };
+    if (typeof Plotly !== 'undefined') Plotly.react('avg_chart', traces, layout, {responsive:true, displayModeBar:true});
+  }
+
+  function renderTable(caliber){
+    var d = REPORT_DATA[caliber];
+    var head = document.getElementById('setTableHead');
+    var body = document.getElementById('setTableBody');
+    if (!d || !d.rows || !head || !body){ return; }
+    var rows = d.rows;
+    if (rows.length === 0){ head.innerHTML='<tr><th>暂无数据</th></tr>'; body.innerHTML='<tr><td>暂无数据</td></tr>'; return; }
+    var cols = Object.keys(rows[0]);
+    var h = '';
+    for (var c=0;c<cols.length;c++){ h += '<th>' + cols[c] + '</th>'; }
+    head.innerHTML = '<tr>' + h + '</tr>';
+    var html = '';
+    for (var i=0;i<rows.length;i++){
+      var r = rows[i];
+      html += '<tr>';
+      for (var c=0;c<cols.length;c++){
+        var col = cols[c];
+        var v = r[col];
+        if (STRING_COLS.indexOf(col) !== -1){
+          html += '<td>' + (v === null || v === undefined ? '—' : String(v)) + '</td>';
+        } else if (col === '套系数量'){
+          html += '<td>' + fmtInt(v) + '</td>';
+        } else if (col === '利润率'){
+          html += '<td>' + fmtPct(v) + '</td>';
+        } else if (col === '利润合计'){
+          if (v === null || v === undefined){ html += '<td>—</td>'; }
+          else { var cls = num(v) < 0 ? 'loss' : 'profit'; html += '<td><span class="' + cls + '">' + fmtMoney(v) + '</span></td>'; }
+        } else {
+          html += '<td>' + fmtMoney(v) + '</td>';
+        }
+      }
+      html += '</tr>';
+    }
+    body.innerHTML = html;
+  }
+
+  function populateSetSelect(caliber){
+    var d = REPORT_DATA[caliber];
+    var cur = setSelect.value;
+    setSelect.innerHTML = '<option value="ALL">全部套系（合计）</option>';
+    if (d && d.rows){
+      for (var i=0;i<d.rows.length;i++){
+        var name = String(d.rows[i]['套系']);
+        var opt = document.createElement('option');
+        opt.value = name; opt.textContent = name;
+        setSelect.appendChild(opt);
+      }
+    }
+    var exists = false;
+    for (var j=0;j<setSelect.options.length;j++){ if (setSelect.options[j].value === cur){ exists = true; break; } }
+    setSelect.value = (cur && cur !== 'ALL' && exists) ? cur : 'ALL';
+  }
+
+  function updateAll(){
+    var caliber = caliberSelect.value;
+    var setOption = setSelect.value;
+    var badge = document.getElementById('caliberBadge');
+    if (badge) badge.textContent = (CALIBER_LABEL[caliber] || caliber);
+    renderTable(caliber);
+    updateKPI(caliber, setOption);
+    renderCost(caliber, setOption);
+    renderProfit(caliber, setOption);
+    renderAvg(caliber, setOption);
+  }
+
+  caliberSelect.addEventListener('change', function(){
+    populateSetSelect(caliberSelect.value);
+    updateAll();
+  });
+  setSelect.addEventListener('change', updateAll);
+
+  caliberSelect.value = __DEFAULT_CALIBER__;
+  populateSetSelect(caliberSelect.value);
+  updateAll();
+})();
+</script>"""
+
+
 def generate_html_report(df_biz, total_income, total_direct, total_indirect, total_profit, total_orders,
                          period_label, filter_option, fee_table_rows, avg_table_rows, shoot_table_rows, labor_table_rows,
-                         set_table_full_html, cost_chart_html, profit_chart_html, avg_chart_html, caliber_label="实际口径"):
+                         set_table_full_html, cost_chart_html, profit_chart_html, avg_chart_html, caliber_label="实际口径",
+                         report_data_json=None):
     # 成本口径说明（直接费用 / 间接费用）备注块，原样保留中文与换行
     caliber_remark_html = '''<div style="margin:24px 0;padding:16px 20px;border:1px solid #e2e8f0;border-left:4px solid #4f46e5;border-radius:12px;background:#fff;">
   <div style="font-size:1.05rem;font-weight:700;margin-bottom:8px;">📌 成本口径说明（直接费用 / 间接费用）</div>
@@ -238,28 +433,52 @@ def generate_html_report(df_biz, total_income, total_direct, total_indirect, tot
         .remark-cell {{ text-align: left !important; white-space: normal !important; color: #475569; font-size: 0.8rem; }}
         .loss {{ color: #ef4444; font-weight: bold; }}
         .profit {{ color: #10b981; font-weight: bold; }}
-        .chart-row {{ display: flex; gap: 20px; margin: 20px 0; flex-wrap: wrap; }}
-        .chart-box {{ background: white; border-radius: 16px; padding: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); flex: 1 1 300px; text-align: center; }}
+        .chart-row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; margin: 20px 0; }}
+        .chart-box {{ background: white; border-radius: 16px; padding: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); text-align: center; min-width: 0; overflow: hidden; }}
         .chart-box img {{ max-width: 100%; height: auto; }}
+        .control-bar {{ display: flex; gap: 24px; justify-content: center; align-items: flex-end; margin: 0 0 24px; padding: 16px 24px; background: white; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); flex-wrap: wrap; }}
+        .control-item {{ display: flex; flex-direction: column; gap: 6px; }}
+        .control-item label {{ font-size: 0.85rem; color: #475569; font-weight: 600; }}
+        .control-bar select {{ padding: 8px 14px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 0.95rem; background: #fff; color: #1e293b; min-width: 200px; cursor: pointer; }}
+        .control-bar select:focus {{ outline: 2px solid #4f46e5; outline-offset: 1px; }}
+        .caliber-note {{ font-size: 0.8rem; color: #64748b; text-align: center; margin: 0 0 8px; }}
     </style>
 </head>
 <body>
     <div class="header">
         <h1>📊 利润分析报告</h1>
         <p>{period_label} · {filter_option} · 订单总数 {total_orders}
-        <span style="{{background:#4f46e5;color:#fff;padding:4px 14px;border-radius:999px;font-weight:600;margin-left:8px;}}">{caliber_label}</span></p>
+        <span id="caliberBadge" style="{{background:#4f46e5;color:#fff;padding:4px 14px;border-radius:999px;font-weight:600;margin-left:8px;}}">{caliber_label}</span></p>
+    </div>
+
+    <div class="control-bar">
+        <div class="control-item">
+            <label for="caliberSelect">费用口径</label>
+            <select id="caliberSelect">
+                <option value="actual">实际口径</option>
+                <option value="allocation">分摊口径</option>
+            </select>
+        </div>
+        <div class="control-item">
+            <label for="setSelect">套系筛选</label>
+            <select id="setSelect">
+                <option value="ALL">全部套系（合计）</option>
+            </select>
+        </div>
     </div>
 
     <div class="kpi-grid">
-        <div class="kpi-card"><div>💰 总收入</div><div class="kpi-value">¥{total_income/10000:.2f}万</div></div>
-        <div class="kpi-card"><div>📉 总成本</div><div class="kpi-value">¥{(total_direct+total_indirect)/10000:.2f}万</div></div>
-        <div class="kpi-card"><div>💎 净利润</div><div class="kpi-value" style="color:#ef4444;">¥{total_profit/10000:.2f}万</div></div>
+        <div class="kpi-card"><div>💰 总收入</div><div class="kpi-value" id="kpiIncome">¥{total_income/10000:.2f}万</div></div>
+        <div class="kpi-card"><div>📉 总成本</div><div class="kpi-value" id="kpiCost">¥{(total_direct+total_indirect)/10000:.2f}万</div></div>
+        <div class="kpi-card"><div>💎 净利润</div><div class="kpi-value" id="kpiProfit" style="color:#ef4444;">¥{total_profit/10000:.2f}万</div></div>
     </div>
 
     <div class="chart-row">
         <div class="chart-box"><h3>成本与利润结构</h3>{cost_chart_html}</div>
         <div class="chart-box"><h3>各套系利润对比</h3>{profit_chart_html}</div>
     </div>
+
+    <div class="caliber-note">同比/环比分析基于导出口径：{caliber_label}</div>
 
     <div class="section-title">📸 拍摄费用明细分析（含同比）</div>
     <div class="table-wrapper">
@@ -301,6 +520,13 @@ def generate_html_report(df_biz, total_income, total_direct, total_indirect, tot
     {caliber_remark_html}
 </body>
 </html>'''
+    if report_data_json:
+        # 防御：避免数据中出现 </script> 提前截断脚本；NaN 已在 Python 侧转 None，此处 JSON 必合法
+        _safe_json = report_data_json.replace('</', '<\\/')
+        _script = (_INTERACTIVE_REPORT_JS
+                   .replace('__REPORT_DATA_JSON__', _safe_json)
+                   .replace('__DEFAULT_CALIBER__', json.dumps('actual' if caliber_label == '实际口径' else 'allocation', ensure_ascii=False)))
+        html = html.replace('</body>', _script + '\n</body>', 1)
     return html
 
 def save_profit_snapshot(period_mode, filter_option, period_start, period_end, period_label, df_full):
@@ -1330,22 +1556,78 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
 ⚠️ 对账提示：当前系统计算时，「人工成本（工资，7 个部门）」也计入「总直接成本」，上表未单列——用你自己的表对账时，请把工资一并计入直接费用，否则两边会差一块。
 """)
 
-    # ==================== 准备导出报告数据 ====================
-    if filter_option == "全部":
-        report_df = df_data
-        snapshot_df = df_full[df_full['业务类型'] != '合计'].copy()
-    elif filter_option == "仅新疆地区":
-        report_df = df_data[df_data['套系'].str.contains('新疆', na=False)]
-        snapshot_df = df_full[(df_full['业务类型'] != '合计') & (df_full['套系'].str.contains('新疆', na=False))]
-    elif filter_option == "仅旅拍":
-        report_df = df_data[df_data['业务类型'] == '旅拍']
-        snapshot_df = df_full[(df_full['业务类型'] != '合计') & (df_full['业务类型'] == '旅拍')]
-    elif filter_option == "仅婚礼":
-        report_df = df_data[df_data['业务类型'] == '婚礼']
-        snapshot_df = df_full[(df_full['业务类型'] != '合计') & (df_full['业务类型'] == '婚礼')]
-    else:
-        report_df = df_data
-        snapshot_df = df_full[df_full['业务类型'] != '合计'].copy()
+    # ==================== 准备导出报告数据（双口径，供前端交互实时切换） ====================
+    def _apply_filter(src_df, opt):
+        """按 filter_option 复用的四分支筛选逻辑；返回剔除「合计」行后的子集。
+        与原始四分支结果完全一致，不改变现有 report_df 的取值。"""
+        if opt == "全部":
+            return src_df[src_df['业务类型'] != '合计'].copy()
+        elif opt == "仅新疆地区":
+            return src_df[(src_df['业务类型'] != '合计') & (src_df['套系'].str.contains('新疆', na=False))].copy()
+        elif opt == "仅旅拍":
+            return src_df[(src_df['业务类型'] != '合计') & (src_df['业务类型'] == '旅拍')].copy()
+        elif opt == "仅婚礼":
+            return src_df[(src_df['业务类型'] != '合计') & (src_df['业务类型'] == '婚礼')].copy()
+        else:
+            return src_df[src_df['业务类型'] != '合计'].copy()
+
+    def _safe_float(v):
+        """pandas NaN/NaT -> None，否则转 float；避免 json.dumps 输出非法 NaN 字面量导致浏览器白屏。"""
+        if pd.isna(v):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _build_report_json(df):
+        """把报表 DataFrame 序列化为 {"rows":[{中文列名:值,...}], "totals":{...}}。
+        NaN/NaT 逐值转 None；数值列转 float，字符串列转 str（key 用中文列名原样）。"""
+        rows = []
+        for _, row in df.iterrows():
+            rec = {}
+            for col in df.columns:
+                val = row[col]
+                if pd.isna(val):
+                    rec[col] = None
+                elif isinstance(val, (int, float, np.integer, np.floating)):
+                    rec[col] = float(val)
+                else:
+                    rec[col] = str(val)
+            rows.append(rec)
+        if df.empty:
+            totals = {'总收入': None, '总直接成本': None, '总间接成本': None, '利润合计': None, '套系数量': None}
+        else:
+            totals = {
+                '总收入': _safe_float(df['总收入'].sum()),
+                '总直接成本': _safe_float(df['总直接成本'].sum()),
+                '总间接成本': _safe_float(df['总间接成本'].sum()),
+                '利润合计': _safe_float(df['利润合计'].sum()),
+                '套系数量': _safe_float(df['套系数量'].sum()),
+            }
+        return {'rows': rows, 'totals': totals}
+
+    report_df = _apply_filter(df_full, filter_option)
+    snapshot_df = report_df.copy()
+
+    if report_df.empty:
+        st.warning("当前筛选条件下没有数据，无法生成利润表。")
+        return
+
+    # 计算另一口径报表（实际/分摊互换），generate_profit_report 带 @st.cache_data，重复调用开销可接受
+    other_mode = 'allocation' if promo_mode == 'actual' else 'actual'
+    other_full = generate_profit_report(period_start.strftime('%Y-%m-%d'), period_end.strftime('%Y-%m-%d'), other_mode)
+    other_report_df = _apply_filter(other_full, filter_option)
+
+    # 组装双口径数据：actual 键存实际口径，allocation 键存分摊口径
+    actual_df = report_df if promo_mode == 'actual' else other_report_df
+    allocation_df = other_report_df if promo_mode == 'actual' else report_df
+    report_payload = {
+        'actual': _build_report_json(actual_df),
+        'allocation': _build_report_json(allocation_df),
+    }
+    report_data_json = json.dumps(report_payload, ensure_ascii=False)
+    json.loads(report_data_json)  # 自检：确保序列化结果无 NaN/NaT 非法字面量
 
     if report_df.empty:
         st.warning("当前筛选条件下没有数据，无法生成利润表。")
@@ -1390,10 +1672,10 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
 
     # 生成完整的套系利润明细表 HTML
     set_table_columns = list(report_df.columns)
-    set_table_full_html = '<div class="table-wrapper"><table><thead><tr>'
+    set_table_full_html = '<div class="table-wrapper"><table><thead id="setTableHead"><tr>'
     for col in set_table_columns:
         set_table_full_html += f'<th>{col}</th>'
-    set_table_full_html += '</tr></thead><tbody>'
+    set_table_full_html += '</tr></thead><tbody id="setTableBody">'
 
     for _, row in report_df.iterrows():
         set_table_full_html += '<tr>'
@@ -1432,10 +1714,26 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
     labor_table_html = df_to_html_rows(salary_df, labor_columns)
 
     # ==================== 交互式 Plotly 图表（HTML + CDN，无需服务器安装字体） ====================
-    def plotly_chart_html(div_id: str, traces: list, layout: dict) -> str:
-        """生成 Plotly 交互图表的 HTML 片段，浏览器通过 CDN 加载 Plotly.js 渲染（支持悬停/缩放，中文正常）。"""
+    def plotly_chart_html(div_id: str, traces: list, layout: dict, square: bool = False) -> str:
+        """生成 Plotly 交互图表的 HTML 片段，浏览器通过 CDN 加载 Plotly.js 渲染（支持悬停/缩放，中文正常）。
+
+        Args:
+            div_id: 图表容器 div 的 id。
+            traces: Plotly traces 列表。
+            layout: Plotly layout 字典。
+            square: 为 True 时，使用方形（aspect-ratio:1/1）容器，保证饼图始终为正圆；
+                    为 False 时保持原 380px 固定高度容器（柱状图适用）。
+        """
         data_json = json.dumps(traces, ensure_ascii=False)
         layout_json = json.dumps(layout, ensure_ascii=False)
+        if square:
+            # 方形容器：饼图在接近正方形的容器里才是正圆，避免被压成竖长椭圆
+            return (
+                f'<div style="width:100%;max-width:400px;aspect-ratio:1/1;margin:0 auto;">'
+                f'<div id="{div_id}" style="width:100%;height:100%;"></div></div>'
+                f'<script>Plotly.newPlot("{div_id}", {data_json}, {layout_json}, '
+                f'{{"responsive": true, "displayModeBar": true}});</script>'
+            )
         return (
             f'<div id="{div_id}" style="width:100%;height:380px;"></div>'
             f'<script>Plotly.newPlot("{div_id}", {data_json}, {layout_json}, '
@@ -1458,7 +1756,7 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
             "textinfo": "label+percent",
             "hole": 0.0,
         }]
-        cost_layout = {"title": {"text": "成本与利润结构"}, "font": font_cfg}
+        cost_layout = {"title": {"text": "成本与利润结构"}, "font": font_cfg, "margin": {"t": 40, "b": 10, "l": 10, "r": 10}}
     else:
         cost_traces = [{
             "type": "bar",
@@ -1474,7 +1772,8 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                         "line": {"color": "black", "width": 1}}],
             "font": font_cfg,
         }
-    cost_chart_html = plotly_chart_html("cost_chart", cost_traces, cost_layout)
+    # 图1 始终使用方形容器（aspect-ratio:1/1），保证饼图为正圆、负利润柱状图也不被压扁
+    cost_chart_html = plotly_chart_html("cost_chart", cost_traces, cost_layout, square=True)
 
     # 图2 各套系利润对比（正绿负红）
     set_names = [str(x) for x in report_df['套系'].tolist()]
@@ -1489,7 +1788,7 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
     }]
     profit_layout = {
         "title": {"text": "各套系利润对比"},
-        "xaxis": {"tickangle": -45},
+        "xaxis": {"tickangle": -45, "automargin": True, "tickfont": {"size": 10}},
         "yaxis": {"title": {"text": "利润 (元)"}},
         "font": font_cfg,
     }
@@ -1513,7 +1812,7 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
     }]
     avg_layout = {
         "title": {"text": "主要费用项均价（按订单数分摊）"},
-        "xaxis": {"tickangle": -45},
+        "xaxis": {"tickangle": -45, "automargin": True, "tickfont": {"size": 10}},
         "yaxis": {"title": {"text": "单均 (元/单)"}},
         "font": font_cfg,
     }
@@ -1523,7 +1822,7 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
         report_df, total_inc, total_dir, total_ind, total_prof, total_ord,
         period_month, filter_option, fee_table_html, avg_table_html, shoot_table_html, labor_table_html,
         set_table_full_html, cost_chart_html, profit_chart_html, avg_chart_html,
-        caliber_label=promo_mode_label
+        caliber_label=promo_mode_label, report_data_json=report_data_json
     )
 
     st.download_button(
