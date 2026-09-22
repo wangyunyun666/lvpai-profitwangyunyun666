@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+matplotlib
+sqlalchemy
+werkzeug
+openpyxl
+# 上云（Streamlit Cloud / Railway / Render 等）需外部 Postgres 时用的驱动
+psycopg2-binary
