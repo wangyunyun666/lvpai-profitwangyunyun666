@@ -1,4 +1,4 @@
-﻿# app.py
+# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -394,7 +394,7 @@ def profit_report_page():
         else:
             period_label = f"{min_year}年{min_month}月-{max_year}年{max_month}月"
             month_list = [f"{y}-{m:02d}" for y, m in month_parts]
-            df_multi = generate_profit_report_multi_month(*month_list, promo_mode)
+            df_multi = generate_profit_report_multi_month(*month_list, promo_mode=promo_mode)
             _render_profit_report(period_start, period_end, filter_option, period_label, None, None, can_see, df_full=df_multi, promo_mode=promo_mode)
 
     elif period_mode == "按年":
@@ -488,20 +488,24 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
             MonthlyStats.business_type == '新疆'
         ).scalar() or 0
 
-        # 微电影订单数（本期间）
+        # 微电影订单数（本期间）—— 单条 JOIN 查询替换 N+1（避免跨国网络下逐行查询拖垮性能）
         micro_travel_oids = set()
         micro_wedding_oids = set()
         micro_xinjiang_oids = set()
-        actual_all = db.query(ActualDirectCost).filter(ActualDirectCost.cost_item == '微电影拍摄费用').all()
-        for ac in actual_all:
-            order = db.query(Order).filter_by(order_id=ac.order_id).first()
-            if order and order.selection_date and period_start <= order.selection_date <= period_end:
-                if '新疆' in (order.set_name or ''):
-                    micro_xinjiang_oids.add(ac.order_id)
-                if order.type == '旅拍':
-                    micro_travel_oids.add(ac.order_id)
-                elif order.type == '婚礼':
-                    micro_wedding_oids.add(ac.order_id)
+        micro_rows = (
+            db.query(ActualDirectCost.order_id, Order.selection_date, Order.set_name, Order.type)
+            .join(Order, Order.order_id == ActualDirectCost.order_id)
+            .filter(ActualDirectCost.cost_item == '微电影拍摄费用')
+            .all()
+        )
+        for oid, sel_date, set_name, otype in micro_rows:
+            if sel_date and period_start <= sel_date <= period_end:
+                if '新疆' in (set_name or ''):
+                    micro_xinjiang_oids.add(oid)
+                if otype == '旅拍':
+                    micro_travel_oids.add(oid)
+                elif otype == '婚礼':
+                    micro_wedding_oids.add(oid)
         micro_travel_cnt = len(micro_travel_oids)
         micro_wedding_cnt = len(micro_wedding_oids)
         micro_xinjiang_cnt = len(micro_xinjiang_oids)
