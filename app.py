@@ -843,10 +843,17 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
         def _area_cnt_for_range(_start, _end, _biz_type):
             """任意期间内产生过「场地」费用（actual_direct_cost.cost_item='场地'）的选片订单数，
             按业务类型口径拆分。用于「交付费用（场地）」均价除数（除数为有场地费的选片订单数，而非全部选品订单数）。
-            新疆套系可能属旅拍或婚礼，独立累加不重复计入。"""
+            新疆套系可能属旅拍或婚礼，独立累加不重复计入。
+
+            关键实现说明（避免后人踩坑）：查询必须对「订单号」去重，而不是只对 (业务类型, 套系名) 两列去重。
+            若误用 .distinct() 作用在 (Order.type, Order.set_name) 上，SQL 会按「套系种类」去重，
+            把 167 个有场地费的旅拍订单压缩成 7 种套系 → 除数变成 7，导致场地费均价被放大约 24 倍（如 ¥150.30→¥3,585.71）。
+            正确做法：.query(Order.order_id, Order.type, Order.set_name)...distinct()，
+            因 order_id 唯一，三列去重等价于「按订单去重」，计数才是正确的订单数。
+            该写法 SQLite 与 PostgreSQL 均兼容，请勿改用 PostgreSQL 专有的 DISTINCT ON（SQLite 不支持）。"""
             _db = SessionLocal()
             try:
-                _rows = _db.query(Order.type, Order.set_name).join(
+                _rows = _db.query(Order.order_id, Order.type, Order.set_name).join(
                     ActualDirectCost, ActualDirectCost.order_id == Order.order_id
                 ).filter(
                     ActualDirectCost.cost_item == '场地',
@@ -855,7 +862,7 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
             finally:
                 _db.close()
             _travel = _wedding = _xj = 0
-            for _t, _s in _rows:
+            for _oid, _t, _s in _rows:
                 if _t == '婚礼':
                     _wedding += 1
                 else:
@@ -998,6 +1005,10 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                     order_cnt = xj_order_cnt
                     micro_cnt = micro_xinjiang_cnt
                     erxiao_cnt = erxiao_xinjiang_cnt
+                    # 新疆 tab 的「有场地费订单数」必须显式赋值：Python 的 for 循环不产生新作用域，
+                    # 若不在此赋值，新疆 tab 会沿用上一轮循环遗留的 area_cnt（如「全部业务」的 244），
+                    # 导致新疆场地费均价被除以 244 而非 33，均价严重偏小。
+                    area_cnt = _area_cnt_for_range(period_start, period_end, '新疆')
                     # 新疆 tab 可能含「新疆婚礼」套系（实测 2026-08：33 单、搭建费 ¥47,600、场地费 ¥36,364），
                     # 婚礼订单数须取新疆范围内的婚礼套系数量，不能硬编码 0（否则主持/搭建均价被归零）
                     _xj_wedding_rows = df_biz[df_biz['业务类型'].astype(str).str.strip() == '婚礼']
