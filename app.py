@@ -307,7 +307,7 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
     var rows = g.rows;
     var div = (REPORT_DATA.divisors || {orders:0, qty:0, erxiao:0, wedding:0});
     var ERXIAO_COLS = ['后期修片费(二销)','工厂费用（二销）','二销选片费'];
-    var WEDDING_COLS = ['交付费用（主持）','交付费用（场地）','交付费用（搭建）'];
+    var WEDDING_COLS = ['交付费用（主持）','交付费用（搭建）'];
     var present = [], values = [];
     var col0 = rows[0] || {};
     for (var k=0;k<AVG_COLS.length;k++){
@@ -326,7 +326,8 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
           // 二销相关费用：除数=二销选片数（做过二销的订单数），与口径无关
           divisor = g.isAll ? num(div.erxiao) : num(g.scope['套系数量']);
         } else if (WEDDING_COLS.indexOf(col) >= 0){
-          // 交付费用（仅婚礼）：除数=婚礼订单数（婚礼选品订单总数），与口径无关
+          // 交付费用（主持/搭建）：仅婚礼订单产生，除数=婚礼订单数（婚礼选品订单总数），与口径无关
+          // 交付费用（场地）：婚礼与旅拍均产生，走下方 else 分支用「选片订单总数」
           divisor = g.isAll ? num(div.wedding) : num(g.scope['套系数量']);
         } else {
           divisor = g.isAll ? num(div.qty) : num(g.scope['套系数量']);
@@ -837,8 +838,10 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
             return float(_travel + _wedding)
 
         def _wedding_cnt_from_df(_df, _biz_type):
-            """婚礼订单数 = 婚礼业务的套系数量合计（仅「全部业务」「婚礼」口径有意义）。"""
-            if _df is None or _df.empty or _biz_type not in ('全部业务', '婚礼'):
+            """婚礼订单数 = 婚礼业务的套系数量合计。
+            「全部业务」「婚礼」「新疆」口径均可能含婚礼套系（新疆套系名如「16980新疆婚礼」），
+            「旅拍」口径不含婚礼套系，返回 0。"""
+            if _df is None or _df.empty or _biz_type not in ('全部业务', '婚礼', '新疆'):
                 return 0.0
             if _biz_type == '婚礼':
                 return float(_df['套系数量'].sum())
@@ -962,7 +965,10 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                     order_cnt = xj_order_cnt
                     micro_cnt = micro_xinjiang_cnt
                     erxiao_cnt = erxiao_xinjiang_cnt
-                    wedding_cnt = 0.0
+                    # 新疆 tab 可能含「新疆婚礼」套系（实测 2026-08：33 单、搭建费 ¥47,600、场地费 ¥36,364），
+                    # 婚礼订单数须取新疆范围内的婚礼套系数量，不能硬编码 0（否则主持/搭建均价被归零）
+                    _xj_wedding_rows = df_biz[df_biz['业务类型'].astype(str).str.strip() == '婚礼']
+                    wedding_cnt = float(_xj_wedding_rows['套系数量'].sum()) if not _xj_wedding_rows.empty else 0.0
                     ly_order_cnt_for_avg = xinjiang_order_cnt_last_year
                 else:
                     df_biz = df_data[df_data['业务类型'] == biz_type]
@@ -1038,7 +1044,9 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                         ('工厂费用（二销）', 'erxiao', '二销选片数'),
                         ('二销选片费', 'erxiao', '二销选片数'),
                         ('交付费用（主持）', 'wedding', '婚礼订单数'),
-                        ('交付费用（场地）', 'wedding', '婚礼订单数'),
+                        # 场地费婚礼与旅拍均会产生（旅拍大理/丽江套系实测 168 单 ¥25,099.98），
+                        # 故除数用本业务「选片订单总数」，不能沿用「婚礼订单数」（旅拍 tab 下为 0 会整行归零）
+                        ('交付费用（场地）', 'qty', '选片订单总数'),
                         ('交付费用（搭建）', 'wedding', '婚礼订单数'),
                     ]
 
@@ -1794,7 +1802,8 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
     elif export_biz_type == "新疆":
         _orders = xinjiang_order_cnt or 0
         _erxiao = erxiao_xinjiang_cnt or 0
-        _wedding = 0.0
+        # 新疆筛选范围内含「新疆婚礼」套系，婚礼订单数须按实际婚礼套系数取，不能恒为 0
+        _wedding = float(report_df[report_df['业务类型']=='婚礼']['套系数量'].sum() or 0)
     elif export_biz_type == "旅拍":
         _orders = travel_order_cnt or 0
         _erxiao = erxiao_travel_cnt or 0
