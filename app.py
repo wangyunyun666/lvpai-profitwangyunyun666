@@ -897,14 +897,28 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                 return str(_v)
 
         # ---------- 转化率（毛客数 ÷ 订单数）数据准备 ----------
-        # 代表月：单月模式用 period_month；多月模式取首月 period_months[0] 作代表
-        _conv_rep_month = period_month if period_month is not None else (period_months[0] if period_months else None)
+        # 代表月：统一取「期间内第一个月」(period_months[0])。
+        # ⚠️ 不要用 period_month 作代表月：它只在单月模式下是 'YYYY-MM'，
+        #    多月模式下传入的是展示用标签（如 '2026年1月-2026年8月'），
+        #    拿去 _shift_month 做 int() 解析会直接抛 ValueError。
+        _conv_rep_month = period_months[0] if period_months else None
 
         def _shift_month(p, delta):
             """对 'YYYY-MM' 形式的期间字符串平移若干个月，自动处理跨年（如 2026-01 -> 2025-12）。"""
             if not p:
                 return None
-            y, m = map(int, str(p).split('-'))
+            _s = str(p).strip()
+            _parts = _s.split('-')
+            # 非 'YYYY-MM' 形式（如多月展示标签）一律视为无代表月，返回 None，
+            # 让下游转化率渲染为「—」而不是整页崩溃。
+            if len(_parts) != 2:
+                return None
+            try:
+                y, m = int(_parts[0]), int(_parts[1])
+            except (TypeError, ValueError):
+                return None
+            if not (1 <= m <= 12):
+                return None
             total = y * 12 + (m - 1) + delta
             return f"{total // 12}-{total % 12 + 1:02d}"
 
@@ -989,6 +1003,10 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                     micro_cnt = micro_travel_cnt + micro_wedding_cnt + micro_xinjiang_cnt
                     erxiao_cnt = erxiao_travel_cnt + erxiao_wedding_cnt
                     wedding_cnt = float(df_data[df_data['业务类型']=='婚礼']['套系数量'].sum()) if not df_data[df_data['业务类型']=='婚礼'].empty else 0.0
+                    # 「全部业务」口径有场地费订单数 = 旅拍 + 婚礼（_area_cnt_for_range 传入 '全部业务' 即为此语义，不含 set_name 含「新疆」者）。
+                    # 必须显式赋值：显示范围单选「全部」时 tabs_to_show 只有 ["全部业务"] 一项，循环仅一轮且无前序赋值可沿用，
+                    # 若漏赋值，下游 calc_avg()/final_rows 在 div_type == 'area' 时读取 area_cnt 会直接抛 NameError 整页崩溃。
+                    area_cnt = _area_cnt_for_range(period_start, period_end, '全部业务')
                     ly_order_cnt_for_avg = travel_order_cnt_last_year + wedding_order_cnt_last_year
                 elif biz_type == "新疆":
                     df_biz = df_data[df_data['套系'].str.contains('新疆', na=False)]
@@ -1612,7 +1630,11 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                     if not has_emp_data:
                         st.info("尚未导入员工工资清单，无法进行归因分析。请先到「👥 员工工资管理」导入。")
                     else:
-                        curr_p = period_month if period_month else period_start.strftime('%Y-%m')
+                        # 代表月统一取期间首月 'YYYY-MM'（与会话内 _conv_rep_month 同口径）。
+                        # 不可用 period_month：多月模式下它是展示标签（如 '2026年1月-2026年8月'），
+                        # 传给 analyze_salary_change 后 filter_by(period=...) 纯字符串匹配查不到数据，
+                        # 会显示 ¥0 / 0 人的误导结果。
+                        curr_p = period_months[0] if period_months else period_start.strftime('%Y-%m')
                         for label, base_p in [
                             ('环比（对比上月）', last_month_start.strftime('%Y-%m') if last_month_start else None),
                             ('同比（对比去年同期）', f"{last_year_start.year}-{last_year_start.month:02d}" if last_year_start else None),
