@@ -305,7 +305,9 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
     if (!g) return;
     var d = REPORT_DATA[caliber];
     var rows = g.rows;
-    var div = (REPORT_DATA.divisors || {orders:0, qty:0});
+    var div = (REPORT_DATA.divisors || {orders:0, qty:0, erxiao:0, wedding:0});
+    var ERXIAO_COLS = ['后期修片费(二销)','工厂费用（二销）','二销选片费'];
+    var WEDDING_COLS = ['交付费用（主持）','交付费用（场地）','交付费用（搭建）'];
     var present = [], values = [];
     var col0 = rows[0] || {};
     for (var k=0;k<AVG_COLS.length;k++){
@@ -320,6 +322,12 @@ const REPORT_DATA = __REPORT_DATA_JSON__;
           divisor = g.isAll
             ? (caliber === 'allocation' ? num(div.orders) : num(div.qty))
             : num(g.scope['套系数量']);
+        } else if (ERXIAO_COLS.indexOf(col) >= 0){
+          // 二销相关费用：除数=二销选片数（做过二销的订单数），与口径无关
+          divisor = g.isAll ? num(div.erxiao) : num(g.scope['套系数量']);
+        } else if (WEDDING_COLS.indexOf(col) >= 0){
+          // 交付费用（仅婚礼）：除数=婚礼订单数（婚礼选品订单总数），与口径无关
+          divisor = g.isAll ? num(div.wedding) : num(g.scope['套系数量']);
         } else {
           divisor = g.isAll ? num(div.qty) : num(g.scope['套系数量']);
         }
@@ -785,6 +793,17 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
         micro_wedding_cnt = len(micro_wedding_oids)
         micro_xinjiang_cnt = len(micro_xinjiang_oids)
 
+        # 二销选片数（本期间，按业务类型拆分）：做过二销(second_sales>0)的订单数
+        erxiao_rows = db.query(Order.order_id, Order.type, Order.set_name).filter(
+            Order.second_sales != None, Order.second_sales > 0,
+            Order.selection_date >= period_start, Order.selection_date <= period_end
+        ).all()
+        erxiao_travel_cnt = erxiao_wedding_cnt = erxiao_xinjiang_cnt = 0
+        for _oid, _otype, _sname in erxiao_rows:
+            if _otype == '旅拍': erxiao_travel_cnt += 1
+            elif _otype == '婚礼': erxiao_wedding_cnt += 1
+            elif _sname and '新疆' in _sname: erxiao_xinjiang_cnt += 1
+
         # ---------- 转化率（毛客数 ÷ 订单数）数据准备 ----------
         # 代表月：单月模式用 period_month；多月模式取首月 period_months[0] 作代表
         _conv_rep_month = period_month if period_month is not None else (period_months[0] if period_months else None)
@@ -876,6 +895,8 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                     total_orders = df_biz['套系数量'].sum()
                     order_cnt = travel_order_cnt + wedding_order_cnt
                     micro_cnt = micro_travel_cnt + micro_wedding_cnt + micro_xinjiang_cnt
+                    erxiao_cnt = erxiao_travel_cnt + erxiao_wedding_cnt + erxiao_xinjiang_cnt
+                    wedding_cnt = float(df_data[df_data['业务类型']=='婚礼']['套系数量'].sum()) if not df_data[df_data['业务类型']=='婚礼'].empty else 0.0
                     ly_order_cnt_for_avg = travel_order_cnt_last_year + wedding_order_cnt_last_year
                 elif biz_type == "新疆":
                     df_biz = df_data[df_data['套系'].str.contains('新疆', na=False)]
@@ -891,6 +912,8 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                         ).scalar() or 0
                     order_cnt = xj_order_cnt
                     micro_cnt = micro_xinjiang_cnt
+                    erxiao_cnt = erxiao_xinjiang_cnt
+                    wedding_cnt = 0.0
                     ly_order_cnt_for_avg = xinjiang_order_cnt_last_year
                 else:
                     df_biz = df_data[df_data['业务类型'] == biz_type]
@@ -898,11 +921,14 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                     if biz_type == '旅拍':
                         order_cnt = travel_order_cnt
                         micro_cnt = micro_travel_cnt
+                        erxiao_cnt = erxiao_travel_cnt
                         ly_order_cnt_for_avg = travel_order_cnt_last_year
                     else:
                         order_cnt = wedding_order_cnt
                         micro_cnt = micro_wedding_cnt
+                        erxiao_cnt = erxiao_wedding_cnt
                         ly_order_cnt_for_avg = wedding_order_cnt_last_year
+                    wedding_cnt = total_orders if biz_type == '婚礼' else 0.0
 
                 if df_biz.empty:
                     st.warning(f"{biz_type} 无数据")
@@ -958,13 +984,13 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                         ('鲜花费用', 'qty', '选片订单总数'),
                         ('像素蛋糕修图费', 'qty', '选片订单总数'),
                         ('后期修片费(一销)', 'qty', '选片订单总数'),
-                        ('后期修片费(二销)', 'qty', '选片订单总数'),
-                        ('工厂费用（一销）', 'qty', '选片订单总数'),
-                        ('工厂费用（二销）', 'qty', '选片订单总数'),
-                        ('二销选片费', 'qty', '选片订单总数'),
-                        ('交付费用（主持）', 'qty', '选片订单总数'),
-                        ('交付费用（场地）', 'qty', '选片订单总数'),
-                        ('交付费用（搭建）', 'qty', '选片订单总数'),
+                        ('后期修片费(二销)', 'erxiao', '二销选片数'),
+                        ('工厂费用（一销）', 'qty', '选品订单总数'),
+                        ('工厂费用（二销）', 'erxiao', '二销选片数'),
+                        ('二销选片费', 'erxiao', '二销选片数'),
+                        ('交付费用（主持）', 'wedding', '婚礼订单数'),
+                        ('交付费用（场地）', 'wedding', '婚礼订单数'),
+                        ('交付费用（搭建）', 'wedding', '婚礼订单数'),
                     ]
 
                     def calc_avg(item, div_type):
@@ -973,6 +999,10 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                         total = df_biz[item].sum()
                         if div_type == 'orders':
                             divisor = order_cnt
+                        elif div_type == 'erxiao':
+                            divisor = erxiao_cnt
+                        elif div_type == 'wedding':
+                            divisor = wedding_cnt
                         elif div_type == 'micro':
                             divisor = micro_cnt
                         else:
@@ -982,7 +1012,7 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
                     rows = []
                     for item, div_type, div_name in avg_config:
                         curr_avg = calc_avg(item, div_type)
-                        divisor_val = order_cnt if div_type == 'orders' else (micro_cnt if div_type == 'micro' else total_orders)
+                        divisor_val = order_cnt if div_type == 'orders' else (erxiao_cnt if div_type == 'erxiao' else (wedding_cnt if div_type == 'wedding' else (micro_cnt if div_type == 'micro' else total_orders)))
                         row = [item, f"¥{curr_avg:,.2f}", f"{div_name}: {divisor_val}"]
                         rows.append(row)
 
@@ -1694,15 +1724,25 @@ def _render_profit_report(period_start, period_end, filter_option, period_month,
     # 人工成本、推广费用（实际）在分摊口径下除数应为「下单订单数」，实际口径下为「选片订单总数」
     if export_biz_type == "全部业务":
         _orders = (travel_order_cnt or 0) + (wedding_order_cnt or 0)
+        _erxiao = (erxiao_travel_cnt or 0) + (erxiao_wedding_cnt or 0) + (erxiao_xinjiang_cnt or 0)
+        _wedding = float(report_df[report_df['业务类型']=='婚礼']['套系数量'].sum() or 0)
     elif export_biz_type == "新疆":
         _orders = xinjiang_order_cnt or 0
+        _erxiao = erxiao_xinjiang_cnt or 0
+        _wedding = 0.0
     elif export_biz_type == "旅拍":
         _orders = travel_order_cnt or 0
+        _erxiao = erxiao_travel_cnt or 0
+        _wedding = 0.0
     else:
         _orders = wedding_order_cnt or 0
+        _erxiao = erxiao_wedding_cnt or 0
+        _wedding = float(report_df[report_df['业务类型']=='婚礼']['套系数量'].sum() or 0)
     report_payload['divisors'] = {
         'orders': float(_orders or 0),
         'qty': float(report_df['套系数量'].sum() or 0),
+        'erxiao': float(_erxiao or 0),
+        'wedding': float(_wedding or 0),
     }
     # 重新序列化（含 divisors），供前端切换口径时重算人工/推广均价与除数
     report_data_json = json.dumps(report_payload, ensure_ascii=False)
