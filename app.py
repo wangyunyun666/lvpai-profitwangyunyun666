@@ -4352,6 +4352,158 @@ def parse_raw_salary_excel(uploaded_file):
     return pd.DataFrame(records)
 
 
+# ==================== 员工工资：同月同人多条合并规则 ====================
+# 月标准列：反映「月度工资标准」，同月同人多条时不能相加，只能择一（取应发金额最大的那行的原值）。
+MS_MONTH_STD_COLS = ['基本工资', '社保补贴', '岗位薪资', '岗位补助', '绩效', '提成']
+
+# 发放列：反映「当月实际发放/承担」，同月同人多条时直接相加。
+MS_PAYOUT_COLS = ['加班补贴', '应发金额', '个税扣款', '保险扣款', '罚款', '实发金额',
+                  '社保公司部分', '总工资', '旅拍分摊金额', '婚礼分摊金额',
+                  '旅拍提成', '婚礼提成']
+
+# 数值列全集（月标准列 + 发放列）
+MS_NUMERIC_COLS = MS_MONTH_STD_COLS + MS_PAYOUT_COLS
+
+
+def _ms_norm_text(val):
+    """工资合并期文本列的「空值归一化」：任何空值形态统一返回空字符串 ''。
+
+    覆盖形态：None、float NaN / pd.NA（pd.isna 为真）、以及字符串化的
+    'nan' / 'None' / 'NaN' / 纯空白。非空值返回 str(val).strip()。
+
+    背景：真实工资文件部分记录「职务」列为空（如 2026-01 运营部），若直接
+    str(NaN) 会得到字面量 'nan' 落库并展示为 nan，故统一归一化为 ''。
+    """
+    if val is None:
+        return ''
+    # pd.isna 对标量返回 bool；对数组返回数组，此处只处理标量故用 try 兜底
+    try:
+        if pd.isna(val):
+            return ''
+    except (TypeError, ValueError):
+        pass
+    text = str(val).strip()
+    if text in ('', 'nan', 'None', 'NaN'):
+        return ''
+    return text
+
+
+def merge_employee_salary_rows(df, adjust_mask=None):
+    """合并同月同人多条工资记录，返回 (合并后 DataFrame, 完全重复组列表)。
+
+    业务规则（用户拍板）：
+    1. 「月标准列」(6 列：基本工资/社保补贴/岗位薪资/岗位补助/绩效/提成) 与
+       「发放列」(12 列：加班补贴/应发金额/个税扣款/保险扣款/罚款/实发金额/
+       社保公司部分/总工资/旅拍分摊金额/婚礼分摊金额/旅拍提成/婚礼提成) 分开处理。
+    2. 发放列：直接相加（保持原有行为）。
+    3. 月标准列：取「A 类行中应发金额最大的那一行」的**原始标准值**，不做任何比例倒挤；
+       若该列本身为空则该列为 0。
+       其中——
+       - A 类行（月标准行）：不是调整行的行（试用/转正分段、多方案择高等）。
+       - B 类行（调整行）：6 个月标准列**原始值全部为空**且 `应发金额 < 0`。
+         这类行只把发放列累加进合计，不参与月标准取值（成本分摊冲减、离职一次性清算）。
+    4. 职务：取 A 类行中**最后一行**的值（转正后才是当前职务）。
+    5. 备注：保持现有拼接行为（'; '.join 非空值）。
+
+    ⚠️ 关键实现细节（易错点）：
+       B 类行判定必须基于**原始单元格是否为空**（NaN）。若调用方在此之前已执行
+       `fillna(0)`，则必须通过 `adjust_mask` 参数显式传入预先算好的布尔掩码
+       （基于 fillna 之前的 NaN 状态计算），否则本函数在数值层面无法区分
+       「原始为空」与「原始为 0」，会把调整行误判为月标准行。
+
+    Args:
+        df: 待合并的工资明细 DataFrame，需含「月份」「部门」「姓名」三列分组键。
+        adjust_mask: 可选的 pd.Series/array[bool]，与 df 同索引，True 表示该行是
+            调整行（B 类）。为 None 时本函数会依据当前值自行推断
+            （6 个月标准列均 == 0 且 应发金额 < 0），仅适用于「未做过 fillna、
+            且原始空值为 NaN/0」的输入。
+
+    Returns:
+        (merged_df, duplicate_groups)：
+        - merged_df: 合并后的 DataFrame，一人一月一条。
+        - duplicate_groups: 列表，每项为 dict，描述「所有列完全一致」的重复组
+          {'月份','部门','姓名','应发金额','出现次数'}。
+    """
+    df = df.copy()
+
+    # ---- 列准备：保证所有数值列存在 ----
+    for col in MS_NUMERIC_COLS:
+        if col not in df.columns:
+            df[col] = 0
+
+    # ---- 完全重复行检测（在合并之前，按原始全部列逐字段比对）----
+    # 注意：使用全部列参与比对，含月份/部门/职务/姓名/全部数值列/备注。
+    compare_cols = list(df.columns)
+    duplicate_groups = []
+    dup_mask = df.duplicated(subset=compare_cols, keep=False)
+    if dup_mask.any():
+        for _, grp in df[dup_mask].groupby(compare_cols, dropna=False, sort=False):
+            duplicate_groups.append({
+                '月份': grp['月份'].iloc[0],
+                '部门': grp['部门'].iloc[0] if '部门' in grp.columns else '',
+                '姓名': grp['姓名'].iloc[0],
+                '应发金额': pd.to_numeric(grp['应发金额'], errors='coerce').fillna(0).iloc[0],
+                '出现次数': int(len(grp)),
+            })
+
+    # ---- 调整行（B 类）掩码：优先使用调用方基于原始 NaN 传入的掩码 ----
+    if adjust_mask is not None:
+        is_adjust = pd.Series(adjust_mask, index=df.index).fillna(False).astype(bool)
+    else:
+        # 回退推断（无原始 NaN 信息时）：月标准列全为 0 且应发金额为负
+        month_vals = df[MS_MONTH_STD_COLS].apply(pd.to_numeric, errors='coerce').fillna(0)
+        gross_vals = pd.to_numeric(df['应发金额'], errors='coerce').fillna(0)
+        is_adjust = (month_vals.abs().sum(axis=1) == 0) & (gross_vals < 0)
+    df['_is_adjust_row'] = is_adjust.values
+
+    # ---- 数值列统一为数值型（此后 NaN -> 0，仅用于合计运算）----
+    for col in MS_NUMERIC_COLS:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # ---- 职务列预归一化（用于取靠后行）----
+    if '职务' not in df.columns:
+        df['职务'] = ''
+    # ---- 备注列预归一化（用于拼接非空值）----
+    if '备注' not in df.columns:
+        df['备注'] = ''
+    df['备注'] = df['备注'].apply(lambda v: '' if v is None or str(v).strip() in ('', 'nan', 'None') else str(v))
+
+    group_cols = ['月份', '部门', '姓名']
+    merged_records = []
+    for _, grp in df.groupby(group_cols, as_index=False, sort=False):
+        rec = {c: grp[c].iloc[0] for c in group_cols}
+
+        # A 类行：非调整行；若整组都是调整行，则退化为用全部行取标准值
+        a_rows = grp[~grp['_is_adjust_row']]
+        if a_rows.empty:
+            a_rows = grp
+
+        # 月标准列：取 A 类行中「应发金额最大」的那一行的原值（并列取靠后行）
+        max_gross = a_rows['应发金额'].max()
+        cand = a_rows[a_rows['应发金额'] == max_gross]
+        std_row = cand.iloc[-1]  # 并列时取行号靠后者（更可能是转正后）
+        for col in MS_MONTH_STD_COLS:
+            rec[col] = float(std_row[col])
+
+        # 发放列：整组相加（含 B 类调整行）
+        for col in MS_PAYOUT_COLS:
+            rec[col] = float(grp[col].sum())
+
+        # 职务：取 A 类行中最后一行（转正后才是当前职务）；空值统一归一化为 ''
+        rec['职务'] = _ms_norm_text(a_rows['职务'].iloc[-1])
+
+        # 部门：分组键之一，本应非空；防御性归一化，避免空值被字符串化成 'nan'
+        rec['部门'] = _ms_norm_text(rec['部门'])
+
+        # 备注：拼接非空值（保持原行为）
+        rec['备注'] = '; '.join(v for v in grp['备注'].tolist() if v)
+
+        merged_records.append(rec)
+
+    merged_df = pd.DataFrame(merged_records, columns=list(group_cols) + MS_NUMERIC_COLS + ['职务', '备注'])
+    return merged_df, duplicate_groups
+
+
 def import_employee_salary_page():
     st.header("👥 员工工资管理")
     module_name = "👥 员工工资管理"
@@ -4414,10 +4566,16 @@ def import_employee_salary_page():
             df['部门'] = df['部门'].astype(str).str.strip()
             df['姓名'] = df['姓名'].astype(str).str.strip()
 
-            numeric_cols = ['基本工资','社保补贴','岗位薪资','岗位补助','绩效','提成','加班补贴',
-                            '应发金额','个税扣款','保险扣款','罚款','实发金额','社保公司部分',
-                            '总工资','旅拍分摊金额','婚礼分摊金额','旅拍提成','婚礼提成']
-            for col in numeric_cols:
+            # ⚠️ 调整行（B 类：成本分摊冲减/离职清算）判定必须基于「原始单元格是否为空」。
+            # 因此必须在下面的 fillna(0) 之前，用原始 NaN 状态先算出掩码。
+            # 判定：6 个月标准列原始值全部为空 且 应发金额 < 0。
+            _month_std_all_null = df[MS_MONTH_STD_COLS].apply(
+                lambda s: pd.to_numeric(s, errors='coerce').isna()
+            ).all(axis=1)
+            _gross_raw = pd.to_numeric(df['应发金额'], errors='coerce')
+            _adjust_mask = (_month_std_all_null & (_gross_raw < 0)).fillna(False)
+
+            for col in MS_NUMERIC_COLS:
                 if col not in df.columns:
                     df[col] = 0
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
@@ -4428,20 +4586,11 @@ def import_employee_salary_page():
             df = df[~df['姓名'].isin(['', 'nan', 'None', '合计', '姓名', 'NaN'])]
             df = df.dropna(subset=['姓名'])
 
-            # 同一人同月多条合并
-            agg_dict = {c: 'sum' for c in numeric_cols}
-            if '职务' in df.columns:
-                agg_dict['职务'] = 'first'
-            else:
-                df['职务'] = ''
-                agg_dict['职务'] = 'first'
-            if '备注' in df.columns:
-                agg_dict['备注'] = lambda x: '; '.join(str(i) for i in x if i and str(i).strip() and str(i) != 'nan')
-            else:
-                df['备注'] = ''
-                agg_dict['备注'] = 'first'
-            group_cols = ['月份', '部门', '姓名']
-            df = df.groupby(group_cols, as_index=False).agg(agg_dict)
+            # 同一人同月多条合并：
+            # - 月标准列（基本工资/社保补贴/岗位薪资/岗位补助/绩效/提成）取「应发金额最大的那行」原值，不倒挤；
+            # - 发放列（应发/实发/总工资/各类扣款与分摊提成等）直接相加。
+            # 详见 merge_employee_salary_rows() 的规则说明。
+            df, dup_groups = merge_employee_salary_rows(df, adjust_mask=_adjust_mask)
 
             if can_see:
                 st.write("📊 数据预览（前20行）：", df.head(20))
@@ -4449,7 +4598,21 @@ def import_employee_salary_page():
             else:
                 st.write("📊 数据预览（前20行）：", mask_dataframe(df.head(20)))
 
-            if st.button("✅ 确认导入", disabled=not can_see):
+            # 完全重复行（所有列一致）必须由用户确认后才能继续导入
+            dup_confirmed = True
+            if dup_groups:
+                dup_confirmed = False
+                st.warning(
+                    f"⚠️ 检测到 {len(dup_groups)} 组「完全一致」的重复工资记录"
+                    "（所有列一模一样，无法自动区分是重复录入还是真实分月记录）。"
+                    "请核对后勾选下方确认项再导入："
+                )
+                st.dataframe(pd.DataFrame(dup_groups), width='stretch')
+                dup_confirmed = st.checkbox(
+                    "我确认这些是不同月份的工资，继续导入", key='emp_dup_confirm'
+                )
+
+            if st.button("✅ 确认导入", disabled=(not can_see) or (not dup_confirmed)):
                 db = SessionLocal()
                 try:
                     combos = set(zip(df['月份'], df['部门'], df['姓名']))
